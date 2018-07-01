@@ -173,6 +173,12 @@ class Decoder extends Transform {
               }
               this._packNumbers && this.push({name: 'numberValue', value: v});
               break;
+            case 14: // nop
+              continue;
+            case 15: // eof
+              if (this._stack.length) return callback(new Error('Premature EOF'));
+              this._expect = 'done';
+              continue;
             default:
               this._expect = 'bytes';
               this._originalCode = code;
@@ -190,7 +196,7 @@ class Decoder extends Transform {
           if (length === 6) {
             // external length
             this._expect = 'bytes';
-            this._originalCode = 13 + (code & 8 ? 2 : 0);
+            this._originalCode = 9 + (code & 8 ? 2 : 0);
             continue;
           }
           if (!length) {
@@ -205,12 +211,6 @@ class Decoder extends Transform {
           this._counter = length;
           continue;
         case 'bytes': // string, number, or EOF
-          if (this._originalCode === 15 && code === 15) {
-            // EOF
-            if (this._stack.length) return callback(new Error('Premature EOF'));
-            this._expect = 'done';
-            continue;
-          }
           let n = code;
           if (this._originalCode & 1) {
             // external length
@@ -219,36 +219,10 @@ class Decoder extends Transform {
               break main; // wait for more input
             }
             const length = n;
-            n = this._buffer[(this._originalCode & 6) === 2 ? 'readIntLE' : 'readUIntLE'](index, length);
+            n = this._buffer[(this._originalCode & 4) ? 'readIntLE' : 'readUIntLE'](index, length);
             index += length;
           }
           if (this._originalCode & 4) {
-            // string
-            const isKey = this._stack.length && this._stack[this._stack.length - 1];
-            if (!n) {
-              if (isKey) {
-                if (this._streamKeys) {
-                  this.push({name: 'startKey'});
-                  this.push({name: 'endKey'});
-                }
-                this._packKeys && this.push({name: 'keyValue', value: ''});
-                this._expect = 'value';
-              } else {
-                if (this._streamStrings) {
-                  this.push({name: 'startString'});
-                  this.push({name: 'endString'});
-                }
-                this._packStrings && this.push({name: 'stringValue', value: ''});
-                if (this._stack.length && this._stack[this._stack.length - 1] === 'value') {
-                  this._expect = 'key';
-                }
-              }
-              break;
-            }
-            this._expect = 'string';
-            this._counter = n;
-            continue;
-          } else {
             // number
             const v = n.toString();
             if (this._streamNumbers) {
@@ -257,8 +231,33 @@ class Decoder extends Transform {
               this.push({name: 'endNumber'});
             }
             this._packNumbers && this.push({name: 'numberValue', value: v});
+            break;
           }
-          break;
+          // string
+          const isKey = this._stack.length && this._stack[this._stack.length - 1];
+          if (!n) {
+            if (isKey) {
+              if (this._streamKeys) {
+                this.push({name: 'startKey'});
+                this.push({name: 'endKey'});
+              }
+              this._packKeys && this.push({name: 'keyValue', value: ''});
+              this._expect = 'value';
+            } else {
+              if (this._streamStrings) {
+                this.push({name: 'startString'});
+                this.push({name: 'endString'});
+              }
+              this._packStrings && this.push({name: 'stringValue', value: ''});
+              if (this._stack.length && this._stack[this._stack.length - 1] === 'value') {
+                this._expect = 'key';
+              }
+            }
+            break;
+          }
+          this._expect = 'string';
+          this._counter = n;
+          continue;
       }
 
       // define next expected value
