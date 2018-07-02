@@ -29,7 +29,8 @@ const getNumberLength = n => {
 };
 
 const getNumberType = n => {
-  if (n === Math.floor(n)) {  // int/uint
+  if (n === Math.floor(n)) {
+    // int/uint
     if (n < 0) {
       n = -n;
       if (n <= 0x800000) {
@@ -42,22 +43,21 @@ const getNumberType = n => {
         return n <= 0x80000000 ? 4 : 5;
       }
       return 6;
-    } else {
-      if (n < 0x800000) {
-        if (n < 0x8000) {
-          return n < 0x80 ? 1 : 2;
-        }
-        return 3;
-      }
-      if (n < 0x8000000000) {
-        return n < 0x80000000 ? 4 : 5;
-      }
-      return 6;
     }
+    if (n < 0x800000) {
+      if (n < 0x8000) {
+        return n < 0x80 ? 1 : 2;
+      }
+      return 3;
+    }
+    if (n < 0x8000000000) {
+      return n < 0x80000000 ? 4 : 5;
+    }
+    return 6;
   }
   // float
   return Float32Array.from([n])[0] === n ? 'float32' : 'float64';
-}
+};
 
 class Encoder extends Transform {
   static make(options) {
@@ -75,6 +75,9 @@ class Encoder extends Transform {
       'useStringValues' in options && (this._values.stringValue = options.useStringValues);
       'useNumberValues' in options && (this._values.numberValue = options.useNumberValues);
       'bufferSize' in options && !isNaN(options.bufferSize) && (bufferSize = Math.max(+options.bufferSize, 1024));
+      this._values.keyValue && (this._values.startKey = this._values.endKey = true);
+      this._values.stringValue && (this._values.startString = this._values.endString = true);
+      this._values.numberValue && (this._values.startNumber = this._values.endNumber = true);
     }
 
     this._buffer = Buffer.alloc(bufferSize);
@@ -155,43 +158,46 @@ class Encoder extends Transform {
 
   _transform(chunk, _, callback) {
     if (this._values[chunk.name]) {
+      let length;
       switch (chunk.name) {
         case 'keyValue':
-          const length = Buffer.byteLength(chunk.value);
+          length = Buffer.byteLength(chunk.value);
           if (length < 5) {
             this.codeOp(length);
           } else if (length < 16) {
             this.codeOp(5).codeOp(length);
           } else {
-            this.codeOp(6).codeNumber(length, getNumberLength(length), 'writeUIntLE');
+            const nLength = getNumberLength(length);
+            this.codeOp(6).codeOp(nLength).codeNumber(length, nLength, 'writeUIntLE');
           }
           this.codeString(chunk.value, length);
           break;
         case 'stringValue':
-          const length = Buffer.byteLength(chunk.value);
+          length = Buffer.byteLength(chunk.value);
           if (length < 16) {
             this.codeOp(8).codeOp(length);
           } else {
-            this.codeOp(9).codeNumber(length, getNumberLength(length), 'writeUIntLE');
+            const nLength = getNumberLength(length);
+            this.codeOp(9).codeOp(nLength).codeNumber(length, nLength, 'writeUIntLE');
           }
           this.codeString(chunk.value, length);
           break;
         case 'numberValue':
-          const n = +chunk.value, type = getNumberType(n);
+          const n = +chunk.value,
+            type = getNumberType(n);
           if (type === 'float64') {
-            this.codeOp(7);
-            // write to buffer
+            this.codeOp(7).codeNumber(n, 8, 'writeDoubleLE');
           } else if (type === 'float32') {
-            this.codeOp(6);
-            // write to buffer
+            this.codeOp(6).codeNumber(n, 4, 'writeFloatLE');
           } else {
-            if (n < 16 && n>= 0) {
+            if (n < 16 && n >= 0) {
               this.codeOp(12).codeOp(n);
             } else {
-              this.codeOp(13).codeNumber(n, type, 'writeIntLE');
+              this.codeOp(13).codeOp(type).codeNumber(n, type, 'writeIntLE');
             }
           }
           break;
+        // skip the rest (startXXX, endXXX)
       }
     } else {
       // filter out values
@@ -212,45 +218,54 @@ class Encoder extends Transform {
           this.codeOp(8).codeOp(0);
           break;
         case 'stringChunk':
-          const length = Buffer.byteLength(chunk.value);
+          let length;
           if (this._expectingKey) {
+            length = Buffer.byteLength(chunk.value);
             if (length < 5) {
               this.codeOp(8 + length);
             } else if (length < 16) {
               this.codeOp(13).codeOp(length);
             } else {
-              this.codeOp(14).codeNumber(length, getNumberLength(length), 'writeUIntLE');
+              const nLength = getNumberLength(length);
+              this.codeOp(14)
+                .codeOp(nLength)
+                .codeNumber(length, nLength, 'writeUIntLE');
             }
           } else {
+            if (this._values.stringValue) break; // skip
+            length = Buffer.byteLength(chunk.value);
             if (length < 16) {
               this.codeOp(10).codeOp(length);
             } else {
-              this.codeOp(11).codeNumber(length, getNumberLength(length), 'writeUIntLE');
+              const nLength = getNumberLength(length);
+              this.codeOp(11)
+                .codeOp(nLength)
+                .codeNumber(length, nLength, 'writeUIntLE');
             }
           }
           this.codeString(chunk.value, length);
           break;
         case 'numberChunk':
-          this._accumulator += chunk.value;
+          if (!his._values.numberValue) this._accumulator += chunk.value;
           break;
-        case 'endString':
-          const n = +(this._accumulator + chunk.value), type = getNumberType(n);
+        case 'endNumber':
+          const n = +this._accumulator,
+            type = getNumberType(n);
           this._accumulator = '';
           if (type === 'float64') {
-            this.codeOp(7);
-            // write to buffer
+            this.codeOp(7).codeNumber(n, 8, 'writeDoubleLE');
           } else if (type === 'float32') {
-            this.codeOp(6);
-            // write to buffer
+            this.codeOp(6).codeNumber(n, 4, 'writeFloatLE');
           } else {
-            if (n < 16 && n>= 0) {
+            if (n < 16 && n >= 0) {
               this.codeOp(12).codeOp(n);
             } else {
-              this.codeOp(13).codeNumber(n, type, 'writeIntLE');
+              this.codeOp(13).codeOp(type).codeNumber(n, type, 'writeIntLE');
             }
           }
           break;
-        default: // startObject, endObject, startArray, endArray, nullValue, trueValue, falseValue, endKey
+        default:
+          // startObject, endObject, startArray, endArray, nullValue, trueValue, falseValue, endKey
           this.codeOp(opCodes[chunk.name]);
           break;
       }
