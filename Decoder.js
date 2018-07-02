@@ -36,10 +36,12 @@ class Decoder extends Transform {
     this._accumulator = '';
     this._originalCode = 0;
     this._isFirstChunk = true;
+    this._expectKey = false;
   }
 
   _transform(chunk, encoding, callback) {
-    this._buffer = this._buffer ? Buffer.concat(this._buffer, chunk) : chunk;
+    console.log('Chunk', chunk);
+    this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk]) : chunk;
     this._processInput(callback);
   }
 
@@ -53,67 +55,67 @@ class Decoder extends Transform {
       code,
       index = 0;
     main: for (;;) {
-      if (this._expect === 'string') {
-        // process strings
-        if (index + this._counter > this._buffer.length) {
-          if (this._done) return callback(new Error('Cannot read a string'));
+      switch (this._expect) {
+        case 'string':
+          // process strings
+          if (index + this._counter > this._buffer.length) {
+            if (this._done) return callback(new Error('Cannot read a string'));
+            break main; // wait for more input
+          }
+          const v = this._counter ? this._buffer.toString('utf8', index, index + this._counter) : '';
+          index += this._counter;
+          if (this._expectKey) {
+            if (this._isFirstChunk) {
+              this._streamKeys && this.push({name: 'startKey'});
+              this._isFirstChunk = false;
+            }
+            if (this._originalCode & 2) {
+              // not the last chunk
+              this._streamKeys && this.push({name: 'stringChunk', value: v});
+              this._packKeys && (this._accumulator += v);
+              this._expect = 'key';
+            } else {
+              // the last chunk
+              if (this._streamKeys) {
+                this.push({name: 'stringChunk', value: v});
+                this.push({name: 'endKey'});
+                this._isFirstChunk = true;
+              }
+              if (this._packKeys) {
+                this.push({name: 'keyValue', value: this._accumulator + v});
+                this._accumulator = '';
+              }
+              this._expect = 'value';
+            }
+          } else {
+            if (this._isFirstChunk) {
+              this._streamStrings && this.push({name: 'startString'});
+              this._isFirstChunk = false;
+            }
+            if (this._originalCode & 2) {
+              // not the last chunk
+              this._streamStrings && this.push({name: 'stringChunk', value: v});
+              this._packStrings && (this._accumulator += v);
+              this._expect = 'value';
+            } else {
+              // the last chunk
+              if (this._streamStrings) {
+                this.push({name: 'stringChunk', value: v});
+                this.push({name: 'endString'});
+                this._isFirstChunk = true;
+              }
+              if (this._packStrings) {
+                this.push({name: 'stringValue', value: this._accumulator + v});
+                this._accumulator = '';
+              }
+              this._expect = this._stack.length && this._stack[this._stack.length - 1] ? 'key' : 'value';
+            }
+          }
+          continue;
+        case 'done':
+          // ignore the stream after EOF
+          index = this._buffer.length;
           break main; // wait for more input
-        }
-        const v = this._buffer.toString('utf8', index, index + this._counter),
-          isKey = this._stack.length && this._stack[this._stack.length - 1];
-        index += this._counter;
-        if (isKey) {
-          if (this._isFirstChunk) {
-            this._streamKeys && this.push({name: 'startKey'});
-            this._isFirstChunk = false;
-          }
-          if (this._originalCode & 2) {
-            // not the last chunk
-            this._streamKeys && this.push({name: 'stringChunk', value: v});
-            this._packKeys && (this._accumulator += v);
-            this._expect = 'key';
-          } else {
-            // the last chunk
-            if (this._streamKeys) {
-              this.push({name: 'stringChunk', value: v});
-              this.push({name: 'endKey'});
-              this._isFirstChunk = true;
-            }
-            if (this._packKeys) {
-              this.push({name: 'keyValue', value: this._accumulator + v});
-              this._accumulator = '';
-            }
-            this._expect = 'value';
-          }
-        } else {
-          if (this._isFirstChunk) {
-            this._streamStrings && this.push({name: 'startString'});
-            this._isFirstChunk = false;
-          }
-          if (this._originalCode & 2) {
-            // not the last chunk
-            this._streamStrings && this.push({name: 'stringChunk', value: v});
-            this._packStrings && (this._accumulator += v);
-          } else {
-            // the last chunk
-            if (this._streamStrings) {
-              this.push({name: 'stringChunk', value: v});
-              this.push({name: 'endString'});
-              this._isFirstChunk = true;
-            }
-            if (this._packStrings) {
-              this.push({name: 'stringValue', value: this._accumulator + v});
-              this._accumulator = '';
-            }
-          }
-          this._expect = 'value';
-        }
-        continue;
-      }
-      if (this._expect === 'done') {
-        // ignore the stream after EOF
-        index = this._buffer.length;
-        break main; // wait for more input
       }
 
       // extract a code
@@ -182,6 +184,7 @@ class Decoder extends Transform {
             default:
               this._expect = 'bytes';
               this._originalCode = code;
+              this._expectKey = false;
               continue;
           }
           break;
@@ -193,19 +196,18 @@ class Decoder extends Transform {
             break;
           }
           const length = code & 7;
+          this._originalCode = 8 + (code & 8 ? 2 : 0);
+          this._expectKey = true;
+          if (length === 5) {
+            // inline length
+            this._expect = 'bytes';
+            continue;
+          }
           if (length === 6) {
             // external length
             this._expect = 'bytes';
-            this._originalCode = 9 + (code & 8 ? 2 : 0);
+            ++this._originalCode;
             continue;
-          }
-          if (!length) {
-            if (this._streamKeys) {
-              this.push({name: 'startKey'});
-              this.push({name: 'endKey'});
-            }
-            this._packKeys && this.push({name: 'keyValue', value: ''});
-            break;
           }
           this._expect = 'string';
           this._counter = length;
@@ -234,27 +236,6 @@ class Decoder extends Transform {
             break;
           }
           // string
-          const isKey = this._stack.length && this._stack[this._stack.length - 1];
-          if (!n) {
-            if (isKey) {
-              if (this._streamKeys) {
-                this.push({name: 'startKey'});
-                this.push({name: 'endKey'});
-              }
-              this._packKeys && this.push({name: 'keyValue', value: ''});
-              this._expect = 'value';
-            } else {
-              if (this._streamStrings) {
-                this.push({name: 'startString'});
-                this.push({name: 'endString'});
-              }
-              this._packStrings && this.push({name: 'stringValue', value: ''});
-              if (this._stack.length && this._stack[this._stack.length - 1] === 'value') {
-                this._expect = 'key';
-              }
-            }
-            break;
-          }
           this._expect = 'string';
           this._counter = n;
           continue;

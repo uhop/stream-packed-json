@@ -80,7 +80,7 @@ class Encoder extends Transform {
       this._values.numberValue && (this._values.startNumber = this._values.endNumber = true);
     }
 
-    this._buffer = Buffer.alloc(bufferSize);
+    this._buffer = Buffer.alloc(16 /*bufferSize*/);
     this._index = 0;
     this._code = 0;
     this._codePos = 0;
@@ -246,7 +246,7 @@ class Encoder extends Transform {
           this.codeString(chunk.value, length);
           break;
         case 'numberChunk':
-          if (!his._values.numberValue) this._accumulator += chunk.value;
+          if (!this._values.numberValue) this._accumulator += chunk.value;
           break;
         case 'endNumber':
           const n = +this._accumulator,
